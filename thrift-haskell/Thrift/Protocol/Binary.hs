@@ -1,14 +1,15 @@
 {-# LANGUAGE MultiWayIf #-}
 -- |
--- Module      :  Pinch.Protocol.Binary
--- Copyright   :  (c) Abhinav Gupta 2015
+-- Module      :  Thrift.Protocol.Binary
+-- Copyright   :  (c) Winterland 2016
 -- License     :  BSD3
 --
--- Maintainer  :  Abhinav Gupta <mail@abhinavg.net>
+-- Maintainer  :  Winterland <drkoster@qq.com>
 -- Stability   :  experimental
 --
--- Implements the Thrift Binary Protocol as a 'Protocol'.
-module Data.Thrift.Protocol.Binary where
+-- Thrift Binary Protocol.
+--
+module Thrift.Protocol.Binary where
 
 
 import Control.Applicative
@@ -26,7 +27,7 @@ import qualified Data.Text.Encoding  as TE
 import Data.Binary.Put
 import Data.Binary.Get
 
-import Data.Thrift.Type
+import Thrift.Type
 
 ------------------------------------------------------------------------------
 
@@ -45,12 +46,6 @@ getLength = fromIntegral <$> getInt32le
 
 putLength :: Int -> Put
 putLength = putInt32be . fromIntegral
-
-getTypeCode :: Get TypeCode
-getTypeCode = getInt8
-
-putTypeCode :: TypeCode -> Put
-putTypeCode = putInt8
 
 ------------------------------------------------------------------------------
 
@@ -72,33 +67,33 @@ putTValue v = case v of
     (TInt32  a) -> putInt32be a
     (TInt64  a) -> putInt64be a
     (TStruct a) -> do
-        (`HM.traverseWithKey` a) $ \ fid val -> do
-            putInt8 (toTypeCode val)
-            putInt16be fid
+        forM_ a $ \ (fid, val) -> do
+            putInt8 (tValueTC val)
+            putInt16be (fromIntegral fid)
             putTValue val
-        putTypeCode stopTypeCode
+        putInt8 TC_Stop
 
     (TList t a) -> do
-        putTypeCode t
+        putInt8 t
         putLength (length a)
         mapM_ putTValue a
 
     (TMap tk tv a) -> do
-        putTypeCode tk
-        putTypeCode tv
-        putLength (HM.size a)
-        forM_ (HM.toList a) $ \ (key, val) -> do
+        putInt8 tk
+        putInt8 tv
+        putLength (length a)
+        forM_ a $ \ (key, val) -> do
             putTValue key
             putTValue val
 
     (TSet t a) -> do
-        putTypeCode t
-        putLength (HS.size a)
-        mapM_ putTValue (HS.toList a)
+        putInt8 t
+        putLength (length a)
+        mapM_ putTValue a
 
 ------------------------------------------------------------------------------
 
-getMessage :: TypeCode -> Get Message
+getMessage :: Int8 -> Get Message
 getMessage typ = do
     size <- getInt32be
     if size < 0
@@ -108,14 +103,16 @@ getMessage typ = do
     -- versionAndType:4 name~4 seqid:4 payload
     -- versionAndType = version:2 0x00 type:1
     parseStrict versionAndType = do
-        let version = versionMask .&. fromIntegral versionAndType
+        let version = versionMask .&. fromIntegral (versionAndType :: Int32)
             tcode = fromIntegral (0x000000ff .&. versionAndType)
         unless (version /= version1) (fail $ "Unsupported version: " ++ show version)
         nlen <- getInt32be
         Message <$> (TE.decodeUtf8 <$> getByteString (fromIntegral nlen))
                 <*> pure tcode
                 <*> getInt32be
-                <*> getTValue typ
+                <*> getTValue (if tcode == MT_Exception
+                                then typ
+                                else getTypeCode (typeCode :: TypeCode AppException))
 
     -- name~4 type:1 seqid:4 payload
     parseNonStrict nlen =
@@ -124,37 +121,35 @@ getMessage typ = do
                 <*> getInt32be
                 <*> getTValue typ
 
-getTValue :: TypeCode -> Get TValue
-getTValue t =
-    if  | t == tBoolTypeCode   -> TBool . (/=0) <$> getWord8
-        | t == tInt8TypeCode   -> TInt8 <$> getInt8
-        | t == tDoubleTypeCode -> TDouble <$> getDoublebe
-        | t == tInt16TypeCode  -> TInt16 <$> getInt16be
-        | t == tInt32TypeCode  -> TInt32 <$> getInt32be
-        | t == tInt64TypeCode  -> TInt64 <$> getInt64be
-        | t == tBinaryTypeCode -> TBinary <$> (getByteString =<< getLength)
-        | t == tStructTypeCode -> TStruct . HM.fromList <$> go
-        | t == tMapTypeCode    -> do kt <- getTypeCode
-                                     vt <- getTypeCode
-                                     len <- getLength
-                                     TMap kt vt . HM.fromList <$>
-                                        replicateM len ((,) <$> getTValue kt <*> getTValue vt)
-        | t == tSetTypeCode    -> do vt <- getTypeCode
-                                     len <- getLength
-                                     TSet vt . HS.fromMap . HM.fromList <$>
-                                        replicateM len ((,) <$> getTValue vt <*> pure ())
-        | t == tListTypeCode   -> do vt <- getTypeCode
-                                     len <- getLength
-                                     TList vt <$> replicateM len (getTValue vt)
-
+getTValue :: Int8 -> Get TValue
+getTValue TC_Bool   = TBool . (/=0) <$> getWord8
+getTValue TC_Int8   = TInt8 <$> getInt8
+getTValue TC_Double = TDouble <$> getDoublebe
+getTValue TC_Int16  = TInt16 <$> getInt16be
+getTValue TC_Int32  = TInt32 <$> getInt32be
+getTValue TC_Int64  = TInt64 <$> getInt64be
+getTValue TC_Binary = TBinary <$> (getByteString =<< getLength)
+getTValue TC_Struct = TStruct <$> go
   where
-    go :: Get [(Int16, TValue)]
+    go :: Get [(Int, TValue)]
     go = do
-        typ <- getTypeCode
-        if typ == stopTypeCode
+        typ <- getInt8
+        if typ == TC_Stop
         then return []
         else do
             fid <- getInt16be
             val <- getTValue typ
             rest <- go
-            fid `seq` val `seq` return ((fid, val) : rest)
+            fid `seq` val `seq` return ((fromIntegral fid, val) : rest)
+getTValue TC_Map    = do kt <- getInt8
+                         vt <- getInt8
+                         len <- getLength
+                         TMap kt vt <$>
+                            replicateM len ((,) <$> getTValue kt <*> getTValue vt)
+getTValue TC_Set    = do vt <- getInt8
+                         len <- getLength
+                         TSet vt <$> replicateM len (getTValue vt)
+getTValue TC_List   = do vt <- getInt8
+                         len <- getLength
+                         TList vt <$> replicateM len (getTValue vt)
+

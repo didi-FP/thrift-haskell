@@ -16,9 +16,10 @@ extra-source-files:  ChangeLog.md
 cabal-version:       >=1.10
 
 library
-  exposed-modules:      Data.Thrift.Type
-                    ,   Data.Thrift.Protocol
-                    ,   Data.Thrift.Protocol.Binary
+  exposed-modules:      Thrift.Type
+                    ,   Thrift.Protocol
+                    ,   Thrift.Protocol.Binary
+                    ,   Thrift.Transport.TCP
   -- other-modules:       
   -- other-extensions:    
   build-depends:        base >=4.8 && <4.9
@@ -29,7 +30,43 @@ library
                     ,   hashable
                     ,   text
                     ,   bytestring
-                    ,   binary >= 0.8.4
+                    ,   binary == 0.8.*
+                    ,   binary-ieee754
+                    ,   binary-parsers >= 0.2.1
 
   -- hs-source-dirs:      
   default-language:    Haskell2010
+
+
+test-suite thrift-haskell-spec
+    type: exitcode-stdio-1.0
+    main-is: Spec.hs
+    hs-source-dirs:
+        tests
+    ghc-options: -Wall
+    build-depends:
+        base >= 4.7 && < 5,
+        bytestring >= 0.10 && < 0.11,
+        containers >= 0.5 && < 0.6,
+        text >= 1.2 && < 1.3,
+        unordered-containers >= 0.2 && < 0.3,
+        vector >= 0.10 && < 0.12,
+        hspec >= 2.0,
+        hspec-discover >= 2.1,
+        pinch,
+        QuickCheck >= 2.5
+    other-modules:
+        Pinch.Arbitrary
+        Pinch.Expectations
+        Pinch.Internal.BuilderParserSpec
+        Pinch.Internal.BuilderSpec
+        Pinch.Internal.FoldListSpec
+        Pinch.Internal.GenericSpec
+        Pinch.Internal.ParserSpec
+        Pinch.Internal.PinchableSpec
+        Pinch.Internal.TTypeSpec
+        Pinch.Internal.Util
+        Pinch.Internal.ValueSpec
+        Pinch.Protocol.BinarySpec
+        Pinch.Protocol.CompactSpec
+    default-language: Haskell2010
