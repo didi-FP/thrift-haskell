@@ -131,6 +131,8 @@ compile root opt p = do
     -- Default imports
     defaultImports :: [H.ImportDecl ()]
     defaultImports = [ hImport "Thrift.Type" "Thrift"
+                     , hImport "Control.Exception" "Exception"
+                     , hImport "Data.Maybe" "Maybe"
                      ]
 
     hImport mod alias =
@@ -198,20 +200,13 @@ compileTDef _ (T.TypeDefinition (T.EnumType T.Enum{..})) =
             [ mkDerivingInst "Eq"
             , mkDerivingInst "Ord"
             , mkDerivingInst "Show"
+            , mkDerivingInst "Enum"
+            , mkDerivingInst "Bounded"
             , mkDerivingInst "Thrift.Data"
             , mkDerivingInst "Thrift.Typeable"
             , mkDerivingInst "Thrift.Generic"
             , mkDerivingInst "Thrift.Hashable"
             ]))
-    , H.InstDecl () Nothing (mkSimpleClassInst "Enum" (mkTypeConT enumName))
-        (Just
-            [ H.InsDecl () . H.FunBind () $ (`map` enums) $ \ (n, v) ->
-                H.Match () (H.name "fromEnum") [H.PApp () (unQual n) []]
-                (H.UnGuardedRhs () (H.intE v)) Nothing
-            , H.InsDecl () . H.FunBind () $ (`map` enums) $ \ (n, v) ->
-                H.Match () (H.name "toEnum") [H.intP v]
-                (H.UnGuardedRhs () (H.Con () (unQual n))) Nothing
-            ])
     , H.InstDecl () Nothing (mkSimpleClassInst "Thrift.Thrift" (mkTypeConT enumName))
         (Just
             [ H.InsDecl () $ H.sfun (H.name "typeCode") []
@@ -243,127 +238,214 @@ compileTDef _ (T.TypeDefinition (T.EnumType T.Enum{..})) =
     getValue acc@(x:xs) Nothing = (x + 1):acc
     getValue acc (Just x') = x' : acc
 
-compileTDef _ (T.TypeDefinition (T.StructType T.Struct{..})) = case structFields of
+compileTDef cOpt (T.TypeDefinition (T.StructType struct@T.Struct{..})) = case structFields of
     -- use '()' as empty request
     []      -> [ H.TypeDecl () (H.DHead () sName) unitType ]
     -- use record for a non empty struct
-    sFields ->
-        [ H.DataDecl () (H.DataType ()) Nothing
-            (H.DHead () sName)
-                [ H.QualConDecl () Nothing Nothing . H.RecDecl () sName $
-                    (`map` sFields) $ \ T.Field{..} ->
-                        H.FieldDecl () [mkName $ T.concat [structName, "_", fieldName]]
-                            (mkFieldType fieldRequiredness fieldValueType)
-                ]
-                (Just (H.Deriving ()
-                    [ mkDerivingInst "Eq"
-                    , mkDerivingInst "Show"
-                    , mkDerivingInst "Thrift.Data"
-                    , mkDerivingInst "Thrift.Typeable"
-                    , mkDerivingInst "Thrift.Generic"
-                    , mkDerivingInst "Thrift.Hashable"
-                    ]))
-        , H.InstDecl () Nothing (mkSimpleClassInst "Thrift.Thrift" (mkTypeConT structName))
-            (Just
-                [ H.InsDecl () $ H.sfun (H.name "typeCode") []
-                    (H.UnGuardedRhs ()
-                        (H.metaFunction "Thrift.TypeCode" [H.var $ H.name "Thrift.TC_Struct"]))
-                    Nothing
-                , H.InsDecl () $ H.sfun (H.name "defaultValue") []
-                    (H.UnGuardedRhs () $ H.letE ((`map` sFields) $ \ T.Field{..} ->
-                        H.patBind
-                            (H.pvar . mkName $ T.concat [structName, "_", fieldName])
-                            (case fieldDefaultValue of
-                                Nothing -> H.var . H.name $ case fieldRequiredness of
-                                    Just T.Optional -> "Nothing"
-                                    _               -> "Thrift.defaultValue"
-                                Just d  -> case fieldRequiredness of
-                                    Just T.Optional ->
-                                        H.metaFunction "Just" [mkConstExp d]
-                                    _ -> mkConstExp d
+    sFields -> case structKind of
+        -- struct
+        T.StructKind ->
+            [ H.DataDecl () (H.DataType ()) Nothing
+                (H.DHead () sName)
+                    [ H.QualConDecl () Nothing Nothing . H.RecDecl () sName $
+                        (`map` sFields) $ \ T.Field{..} ->
+                            H.FieldDecl () [mkName $ T.concat [structName, "_", fieldName]]
+                                (mkFieldType fieldRequiredness fieldValueType)
+                    ]
+                    (Just (H.Deriving ()
+                        [ mkDerivingInst "Eq"
+                        , mkDerivingInst "Show"
+                        , mkDerivingInst "Thrift.Data"
+                        , mkDerivingInst "Thrift.Typeable"
+                        , mkDerivingInst "Thrift.Generic"
+                        , mkDerivingInst "Thrift.Hashable"
+                        ]))
+            , H.InstDecl () Nothing (mkSimpleClassInst "Thrift.Thrift" (mkTypeConT structName))
+                (Just
+                    [ H.InsDecl () $ H.sfun (H.name "typeCode") []
+                        (H.UnGuardedRhs ()
+                            (H.metaFunction "Thrift.TypeCode" [H.var $ H.name "Thrift.TC_Struct"]))
+                        Nothing
+                    , H.InsDecl () $ H.sfun (H.name "defaultValue") []
+                        (H.UnGuardedRhs () $ H.letE ((`map` sFields) $ \ T.Field{..} ->
+                            H.patBind
+                                (H.pvar . mkName $ T.concat [structName, "_", fieldName])
+                                (case fieldDefaultValue of
+                                    Nothing -> H.var . H.name $ case fieldRequiredness of
+                                        Just T.Optional -> "Nothing"
+                                        _               -> "Thrift.defaultValue"
+                                    Just d  -> case fieldRequiredness of
+                                        Just T.Optional ->
+                                            H.metaFunction "Just" [mkConstExp d]
+                                        _ -> mkConstExp d
+                                )
                             )
-                        )
-                        sExp
-                    )
-                    Nothing
-                , H.InsDecl () . H.FunBind () $
-                    [ toTValueMatch
-                        [sPat]
-                        (H.UnGuardedRhs () . tStructExp . H.metaFunction "Thrift.catMaybes" $
-                            [ H.List () $ (`map` sFields) $ \ T.Field{..} ->
-                                let n = camel . T.unpack . T.concat $ [structName, "_", fieldName]
-                                in case fieldIdentifier of
-                                    Nothing -> error $ "can't find field identifier for " ++ n
-                                    Just fid ->
-                                        case fieldRequiredness of
-                                            Just T.Optional ->
-                                                H.caseE (H.var $ H.name n)
-                                                    [ H.alt (H.metaConPat "Just" [H.pvar $ H.name "x"]) $
-                                                        H.metaFunction "Just"
-                                                            [ H.tuple
-                                                                [ H.intE fid
-                                                                , toTValueFun (H.var $ H.name "x")
-                                                                ]
-                                                            ]
-                                                    , H.alt H.wildcard (H.var $ H.name "Nothing")
-                                                    ]
-                                            _ ->
-                                                H.metaFunction "Just"
-                                                    [ H.tuple
-                                                        [ H.intE fid
-                                                        , toTValueFun (H.var $ H.name n)
-                                                        ]
-                                                    ]
-                            ]
+                            sExp
                         )
                         Nothing
-                    ]
-                , H.InsDecl () . H.FunBind () $
-                    let mPat = H.pvar $ H.name "m"
-                        mExp = H.var $ H.name "m"
-                        xPat = H.pvar $ H.name "x"
-                        xExp = H.var $ H.name "x"
-                    -- convert to 'IM.IntMap' first, then use 'Maybe' monad
-                    in [ fromTValueMatch [tStructPat xPat]  -- pattern match kv list
-                        (H.UnGuardedRhs () . H.letE
-                            (H.patBind mPat (H.metaFunction "Thrift.fromList" [xExp]) :
-                                ((`map` sFields) $ \ T.Field{..} ->
+                    , H.InsDecl () . H.FunBind () $
+                        [ toTValueMatch
+                            [sPat]
+                            (H.UnGuardedRhs () . tStructExp . H.metaFunction "Maybe.catMaybes" $
+                                [ H.List () $ (`map` sFields) $ \ T.Field{..} ->
                                     let n = camel . T.unpack . T.concat $ [structName, "_", fieldName]
-                                        -- how 'T.FieldRequiredness' affect deserialization
-                                        lookupFunc = case (fieldRequiredness, fieldDefaultValue) of
-                                            -- default field
-                                            (Nothing, Nothing) ->
-                                                H.metaFunction "Thrift.lookupDefault" .
-                                                    (H.var (H.name "Thrift.defaultValue") :)
-                                            (Nothing, Just d) ->
-                                                H.metaFunction "Thrift.lookupDefault" .
-                                                    (mkConstExp d :)
-                                            (Just T.Optional, Nothing) ->
-                                                H.metaFunction "Thrift.lookupOptional" .
-                                                    (H.var (H.name "Nothing") :)
-                                            (Just T.Optional, Just d) ->
-                                                H.metaFunction "Thrift.lookupOptional" .
-                                                    (H.metaFunction "Just" [mkConstExp d] :)
-                                            (Just T.Required, _) ->
-                                                H.metaFunction "Thrift.lookupRequired"
-
                                     in case fieldIdentifier of
                                         Nothing -> error $ "can't find field identifier for " ++ n
                                         Just fid ->
-                                            H.patBind (H.pvar $ H.name n)
-                                                (lookupFunc [ H.intE fid , mExp ])
-                                )
-                            ) $ sExp
+                                            case fieldRequiredness of
+                                                Just T.Optional ->
+                                                    H.caseE (H.var $ H.name n)
+                                                        [ H.alt (H.metaConPat "Just" [H.pvar $ H.name "x"]) $
+                                                            H.metaFunction "Just"
+                                                                [ H.tuple
+                                                                    [ H.intE fid
+                                                                    , toTValueFun (H.var $ H.name "x")
+                                                                    ]
+                                                                ]
+                                                        , H.alt H.wildcard (H.var $ H.name "Nothing")
+                                                        ]
+                                                _ ->
+                                                    H.metaFunction "Just"
+                                                        [ H.tuple
+                                                            [ H.intE fid
+                                                            , toTValueFun (H.var $ H.name n)
+                                                            ]
+                                                        ]
+                                ]
+                            )
+                            Nothing
+                        ]
+                    , H.InsDecl () . H.FunBind () $
+                        let mPat = H.pvar $ H.name "m"
+                            mExp = H.var $ H.name "m"
+                            xPat = H.pvar $ H.name "x"
+                            xExp = H.var $ H.name "x"
+                        -- convert to 'IM.IntMap' first, then use 'Maybe' monad
+                        in [ fromTValueMatch [tStructPat xPat]  -- pattern match kv list
+                            (H.UnGuardedRhs () . H.letE
+                                (H.patBind mPat (H.metaFunction "Thrift.mkIntMap" [xExp]) :
+                                    ((`map` sFields) $ \ T.Field{..} ->
+                                        let n = camel . T.unpack . T.concat $ [structName, "_", fieldName]
+                                            -- how 'T.FieldRequiredness' affect deserialization
+                                            lookupFunc = case (fieldRequiredness, fieldDefaultValue) of
+                                                -- default field
+                                                (Nothing, Nothing) ->
+                                                    H.metaFunction "Thrift.lookupDefault" .
+                                                        (H.var (H.name "Thrift.defaultValue") :)
+                                                (Nothing, Just d) ->
+                                                    H.metaFunction "Thrift.lookupDefault" .
+                                                        (mkConstExp d :)
+                                                (Just T.Optional, Nothing) ->
+                                                    H.metaFunction "Thrift.lookupOptional" .
+                                                        (H.var (H.name "Nothing") :)
+                                                (Just T.Optional, Just d) ->
+                                                    H.metaFunction "Thrift.lookupOptional" .
+                                                        (H.metaFunction "Just" [mkConstExp d] :)
+                                                (Just T.Required, _) ->
+                                                    H.metaFunction "Thrift.lookupRequired"
+
+                                        in case fieldIdentifier of
+                                            Nothing -> error $ "can't find field identifier for " ++ n
+                                            Just fid ->
+                                                H.patBind (H.pvar $ H.name n)
+                                                    (lookupFunc [ H.intE fid , mExp ])
+                                    )
+                                ) $ sExp
+                            )
+                            Nothing
+                        , fromTValueMatch
+                            [H.wildcard]   -- pattern match enum
+                            (H.UnGuardedRhs ()
+                                (H.metaFunction "error" [H.strE "bad struct value"]))
+                            Nothing
+                        ]
+                    ])
+            ]
+        T.ExceptionKind ->
+            let struct' = struct{ T.structKind = T.StructKind }
+                defs = compileTDef cOpt (T.TypeDefinition (T.StructType struct'))
+            in defs ++ [
+                H.InstDecl () Nothing
+                    (mkSimpleClassInst "Exception.Exception" (mkTypeConT structName))
+                    Nothing
+            ]
+        T.UnionKind ->
+            let fields = (`map` sFields) $ \ f@T.Field{..} ->
+                    (mkCapName $ T.concat [structName, "_", fieldName], f)
+            in [ H.DataDecl () (H.DataType ()) Nothing
+                    (H.DHead () sName)
+                    ((`map` fields) $ \ (fname, T.Field{..}) ->
+                        H.QualConDecl () Nothing
+                            Nothing (H.ConDecl () fname [mkType fieldValueType])
+                    )
+                    (Just (H.Deriving ()
+                        [ mkDerivingInst "Eq"
+                        , mkDerivingInst "Show"
+                        , mkDerivingInst "Thrift.Data"
+                        , mkDerivingInst "Thrift.Typeable"
+                        , mkDerivingInst "Thrift.Generic"
+                        , mkDerivingInst "Thrift.Hashable"
+                        ]))
+            , H.InstDecl () Nothing (mkSimpleClassInst "Thrift.Thrift" (mkTypeConT structName))
+                (Just
+                    [ H.InsDecl () $ H.sfun (H.name "typeCode") []
+                        (H.UnGuardedRhs ()
+                            (H.metaFunction "Thrift.TypeCode" [H.var $ H.name "Thrift.TC_Struct"]))
+                        Nothing
+                    , H.InsDecl () $ H.sfun (H.name "defaultValue") []
+                        (H.UnGuardedRhs ()
+                            (H.app (H.var . fst $ head fields)
+                                (H.var $ H.name "Thrift.defaultValue"))
                         )
                         Nothing
-                    , fromTValueMatch
-                        [H.wildcard]   -- pattern match enum
-                        (H.UnGuardedRhs ()
-                            (H.metaFunction "error" [H.strE "bad struct value"]))
-                        Nothing
-                    ]
-                ])
-        ]
+                    , H.InsDecl () . H.FunBind () . (`map` fields) $ \ (n, T.Field{..}) ->
+                        case fieldIdentifier of
+                            Nothing -> error $ "can't find field identifier for " ++
+                                        T.unpack fieldName
+                            Just fid ->
+                                let xPat = H.pvar $ H.name "x"
+                                    xExp = H.var $ H.name "x"
+                                in toTValueMatch
+                                    [H.PApp () (unQual n) [xPat]]
+                                    (H.UnGuardedRhs () . tStructExp . H.listE $ [
+                                        H.tuple [ H.intE fid
+                                                , H.metaFunction "Thrift.toTValue" [xExp]
+                                                ]
+                                    ])
+                                    Nothing
+                    , let mPat = H.pvar $ H.name "m"
+                          mExp = H.var $ H.name "m"
+                          mPat' = H.pvar $ H.name "m'"
+                          mExp' = H.var $ H.name "m'"
+                          xPat = H.pvar $ H.name "x"
+                          xExp = H.var $ H.name "x"
+                      in H.InsDecl () $ H.FunBind ()
+                        [ fromTValueMatch
+                            [H.pApp (H.name "Thrift.TStruct") [mPat]]
+                            (H.GuardedRhss () $ ((`map` fields) $ \ (n, T.Field{..}) ->
+                                case fieldIdentifier of
+                                    Nothing -> error $ "can't find field identifier for " ++
+                                                T.unpack fieldName
+                                    Just fid -> H.GuardedRhs ()
+                                        [ H.Generator () (H.metaConPat "Just" [xPat]) $
+                                            H.metaFunction "Thrift.lookup" [ H.intE fid, mExp' ]
+                                        ]
+                                        (H.app (H.var n) (fromTValueFun xExp))
+                                ) ++ [ H.GuardedRhs () [H.Qualifier () (H.var $ H.name "otherwise")]
+                                    (H.metaFunction "error" [H.strE "bad union struct"]) ]
+                            )
+                            (Just $ H.binds
+                                [ H.patBind mPat' $ H.metaFunction "Thrift.mkIntMap" [mExp]
+                                ])
+                        , fromTValueMatch
+                            [H.wildcard]
+                            (H.UnGuardedRhs ()
+                                (H.metaFunction "error" [H.strE "bad union struct value"]))
+                            Nothing
+                        ]
+                    ])
+            ]
+
   where
     sName = mkCapName structName
     -- we rely on @RecordWildCards@ to simplify naming
@@ -376,10 +458,8 @@ compileTDef _ (T.TypeDefinition (T.StructType T.Struct{..})) = case structFields
 compileTDef _ (T.TypeDefinition (T.SenumType T.Senum{..})) = error "compileTDef: senum is deprecated"
 
 compileTDef cOpt (T.ServiceDefinition T.Service{..}) =
-    (`concatMap` serviceFunctions) $ \ T.Function{..} ->
+    ((`concatMap` serviceFunctions) $ \ T.Function{..} ->
         let n = T.concat [serviceName, "_", functionName]
-            reqName = mkCapName (n `T.append` "Req")
-            resName = mkCapName (n `T.append` "Res")
             fname = mkName n
             -- use unitType as thrift void
             returnType = maybe unitType mkType functionReturnType
@@ -391,7 +471,7 @@ compileTDef cOpt (T.ServiceDefinition T.Service{..}) =
                 ,   T.structAnnotations = []
                 ,   T.structDocstring = functionDocstring  -- unused
                 ,   T.structSrcAnnot = functionSrcAnnot    -- unused
-                ,   T.structKind = T.StructKind            -- unused
+                ,   T.structKind = T.StructKind
                 }
             in compileTDef cOpt (T.TypeDefinition (T.StructType reqStruct))
 
@@ -422,24 +502,50 @@ compileTDef cOpt (T.ServiceDefinition T.Service{..}) =
                         ,   T.structAnnotations = []
                         ,   T.structDocstring = functionDocstring      -- unused
                         ,   T.structSrcAnnot = functionSrcAnnot        -- unused
-                        ,   T.structKind = T.StructKind                -- unused
+                        ,   T.structKind = T.UnionKind
                         }
             in compileTDef cOpt (T.TypeDefinition (T.StructType resStruct))
 
-        ,   [ H.TypeSig () [mkName n] . H.TyApp ()
-                (H.TyApp () (H.TyCon () (unQual $ H.name "Thrift.RPC"))
-                            (H.TyCon () (unQual reqName)))
-                $ (H.TyCon () (unQual resName))
+        ,   [ H.TypeSig () [mkName n] $
+                mkTypeConT "Thrift.Protocol" -->
+                    mkTypeConT "Thrift.Transport" -->
+                        mkTypeConT (n `T.append` "Req") -->
+                            (ioTypCon $: mkTypeConT (n `T.append` "Res"))
+
             ]
-        ,   [ H.nameBind (mkName n) $ H.metaFunction "Thrift.RPC"
+        ,   [ H.nameBind (mkName n) $ H.metaFunction "Thrift.request"
                  [ H.strE $ T.unpack functionName
                  , if functionOneWay then (H.var $ H.name "True")
                                      else (H.var $ H.name "False")
                  ]
             ]
         ]
+    ) ++ let hName = mkCapName $ serviceName `T.append` "Handler"
+             sName = mkCapName $ serviceName `T.append` "Server"
+    in [ H.DataDecl () (H.DataType ()) Nothing
+            (H.DHead () hName)
+            [ H.QualConDecl () Nothing Nothing . H.RecDecl () hName $
+                (`map` serviceFunctions) $ \ T.Function{..} ->
+                    let n = T.concat [serviceName, "_", functionName]
+                        reqT = n `T.append` "Req"
+                        resT = n `T.append` "Res"
+                    in H.FieldDecl () [mkName $ n `T.append` "Handler"]
+                        (mkTypeConT reqT -->
+                            (ioTypCon $: mkTypeConT resT)
+                        )
+            ]
+            Nothing
+    ]
 
 --------------------------------------------------------------------------------
+
+(-->) :: H.Type () -> H.Type () -> H.Type ()
+(-->) = H.TyFun ()
+infixr 4 -->
+
+($:) :: H.Type () -> H.Type () -> H.Type ()
+($:) = H.TyApp ()
+infixl 2 $:
 
 -- | Directly make a 'QName' from 'Name', we never use constructor directly
 -- because we just use "X.Y" style 'String'.
@@ -458,7 +564,7 @@ typCon :: String -> H.Type ()
 typCon = H.TyCon () . unQual . H.name
 
 mkFieldType :: Maybe T.FieldRequiredness -> T.TypeReference a -> H.Type ()
-mkFieldType (Just T.Optional) t = H.TyApp () (typCon "Maybe") (mkType t)
+mkFieldType (Just T.Optional) t = typCon "Maybe" $: mkType t
 mkFieldType _ t = mkType t
 
 unitType :: H.Type ()
@@ -485,10 +591,8 @@ mkType (T.I16Type _ _      ) = typCon "Thrift.Int16"
 mkType (T.I32Type _ _      ) = typCon "Thrift.Int32"
 mkType (T.I64Type _ _      ) = typCon "Thrift.Int64"
 mkType (T.DoubleType _ _   ) = typCon "Double"
-mkType (T.MapType kt vt _ _) = H.TyApp ()
-                                    (H.TyApp () (typCon "Thrift.HashMap") (mkType kt))
-                                    (mkType vt)
-mkType (T.SetType vt _ _   ) = H.TyApp () (typCon "Thrift.HashSet") (mkType vt)
+mkType (T.MapType kt vt _ _) = typCon "Thrift.HashMap" $: mkType kt $: mkType vt
+mkType (T.SetType vt _ _   ) = typCon "Thrift.HashSet" $: mkType vt
 mkType (T.ListType vt _ _  ) = H.TyList () (mkType vt)
 
 mkConstExp :: T.ConstValue a -> H.Exp ()
@@ -502,7 +606,7 @@ mkConstExp (T.ConstIdentifier i _) = let is = map (pascal . T.unpack) $ T.split 
                                             _ -> error $ "bad const identifier: " ++ T.unpack i
                                      in H.var (H.name i')
 mkConstExp (T.ConstList cs _     ) = H.listE (map mkConstExp cs)
-mkConstExp (T.ConstMap kvs _     ) = H.listE (map mkKV kvs)
+mkConstExp (T.ConstMap kvs _     ) = H.metaFunction "Thrift.mkHashMap" [H.listE (map mkKV kvs)]
   where
     mkKV :: (T.ConstValue a, T.ConstValue b) -> H.Exp ()
     mkKV (k, v) = H.tuple [mkConstExp k, mkConstExp v]
@@ -535,5 +639,8 @@ toTValueMatch = H.Match () (H.name "toTValue")
 
 rightCon :: H.Exp ()
 rightCon = H.Con () . unQual $ H.name "Right"
+
+ioTypCon :: H.Type ()
+ioTypCon = H.TyCon () . unQual $ H.name "IO"
 
 --------------------------------------------------------------------------------

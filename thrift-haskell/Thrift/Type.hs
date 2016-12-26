@@ -28,7 +28,7 @@ module Thrift.Type
   , lookupOptional
   , lookupRequired
   , lookupDefault
-  , RPC(..)
+  , IM.lookup
   , request
 
   -- *
@@ -49,8 +49,8 @@ module Thrift.Type
   , HM.HashMap
   , HS.HashSet
   , Int8, Int16, Int32, Int64
-  , catMaybes
-  , IM.fromList
+  , mkIntMap
+  , mkHashMap
   , Data(..)
   , Typeable(..)
   , Generic(..)
@@ -59,7 +59,7 @@ module Thrift.Type
 
 import Data.Int
 import Data.IORef (newIORef, atomicModifyIORef', IORef)
-import Control.Monad (when)
+import Control.Monad (when, unless)
 import Control.Exception (Exception(..), throwIO)
 import qualified Data.ByteString as B
 import qualified Data.Text as T
@@ -70,7 +70,6 @@ import Data.Hashable (Hashable(..))
 import qualified Data.IntMap as IM
 import qualified Data.HashMap.Strict as HM
 import qualified Data.HashSet as HS
-import Data.Maybe (catMaybes)
 import Data.Data (Data(..))
 import Data.Typeable (Typeable(..), Proxy(..))
 import GHC.Generics (Generic(..))
@@ -245,6 +244,13 @@ instance (Thrift v) => Thrift [v] where
     fromTValue (TList _ xs) = map fromTValue xs
     fromTValue _         = error "bad list"
 
+instance Thrift () where
+    typeCode = TypeCode TC_Struct
+    defaultValue = ()
+    toTValue _ = TStruct []
+    fromTValue (TStruct []) = ()
+    fromTValue _ = error "bad void"
+
 lookupOptional :: (Thrift a) => Maybe a -> Int -> IM.IntMap TValue -> Maybe a
 lookupOptional def key m = case IM.lookup key m of
     Nothing -> def
@@ -259,6 +265,12 @@ lookupDefault :: (Thrift a) => a -> Int -> IM.IntMap TValue -> a
 lookupDefault def key m = case IM.lookup key m of
     Nothing -> def
     Just a  -> fromTValue a
+
+mkIntMap :: [(Int, TValue)] -> IM.IntMap TValue
+mkIntMap = IM.fromList
+
+mkHashMap :: (Eq k, Hashable k, Hashable v) => [(k, v)] -> HM.HashMap k v
+mkHashMap = HM.fromList
 
 --------------------------------------------------------------------------------
 
@@ -296,12 +308,6 @@ data Transport = Transport
     , transportClose :: IO ()
     }
 
--- Thrift service function tagged with request & respond type
-data RPC req res = RPC
-    { serviceName :: T.Text
-    , serviceOneWay :: Bool
-    }
-
 seqIdGen :: IORef Int32
 seqIdGen = unsafePerformIO (newIORef 0)
 {-# NOINLINE seqIdGen #-}
@@ -310,40 +316,45 @@ seqId :: IO Int32
 seqId = atomicModifyIORef' seqIdGen $ \x -> let z = x+1 in (z, z)
 {-# INLINABLE seqId #-}
 
+-- | polymorphric request method
+--
 request :: forall req res . (Thrift req, Thrift res)
-        => Protocol
+        => T.Text  -- method name
+        -> Bool  -- is oneway
+        -> Protocol
         -> Transport
-        -> RPC req res
         -> req -> IO res
-request Protocol{..} Transport{..} RPC{..} req = do
+request rpcName rpcOneWay Protocol{..} Transport{..} req = do
     sid <- seqId
     -- serialize request
-    let msg = Message serviceName
-                (if serviceOneWay then MT_Oneway else MT_Call)
+    let msg = Message rpcName
+                (if rpcOneWay then MT_Oneway else MT_Call)
                 sid
                 (toTValue req)
     writeLazyByteString (runPut (encodeMessage msg)) transportOutput
     -- deserialize respond
-    res <- getFromStream (decodeMessage $ getTypeCode (typeCode :: TypeCode res))
-             transportInput
-    case res of
-        Just Message{..} -> do
-            when (messageId /= sid) . throwIO $
-                AppException AE_BAD_SEQUENCE_ID "client sequence id verify failed"
-            case messageType of
-                MT_Exception -> throwIO (fromTValue messagePayload :: AppException)
-                MT_Reply -> return (fromTValue messagePayload)
-                _ -> throwIO $ AppException
-                                AE_INVALID_MESSAGE_TYPE
-                                ("unknown message type: " `T.append`
-                                    (T.pack $ show messageType))
+    if rpcOneWay
+    then return defaultValue
+    else do
+        res <- getFromStream (decodeMessage $ getTypeCode (typeCode :: TypeCode res))
+                 transportInput
+        case res of
+            Just Message{..} -> do
+                when (messageId /= sid) . throwIO $
+                    AppException AE_BAD_SEQUENCE_ID "client sequence id verify failed"
+                case messageType of
+                    MT_Exception -> throwIO (fromTValue messagePayload :: AppException)
+                    MT_Reply -> return (fromTValue messagePayload)
+                    _ -> throwIO $ AppException
+                                    AE_INVALID_MESSAGE_TYPE
+                                    ("unknown message type: " `T.append`
+                                        (T.pack $ show messageType))
 
-        Nothing -> throwIO $ AppException AE_INTERNAL_ERROR "bad network"
+            Nothing -> throwIO $ AppException AE_INTERNAL_ERROR "bad network"
 
 respond :: (Thrift req, Thrift res)
         => Protocol
         -> Transport
-        -> RPC req res
         -> (req -> IO res)
         -> IO ()
 respond = error "WIP"
