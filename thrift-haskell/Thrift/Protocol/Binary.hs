@@ -19,6 +19,7 @@ import Data.Bits
 import Data.ByteString     (ByteString)
 import Data.Int
 import Data.Word
+import Thrift.Type
 
 import qualified Data.ByteString     as B
 import qualified Data.HashMap.Strict as HM
@@ -27,7 +28,6 @@ import qualified Data.Text.Encoding  as TE
 import Data.Binary.Put
 import Data.Binary.Get
 
-import Thrift.Type
 
 ------------------------------------------------------------------------------
 
@@ -42,7 +42,7 @@ version1 :: Word32
 version1 = 0x80010000
 
 getLength :: Get Int
-getLength = fromIntegral <$> getInt32le
+getLength = fromIntegral <$> getInt32be
 
 putLength :: Int -> Put
 putLength = putInt32be . fromIntegral
@@ -52,9 +52,41 @@ putLength = putInt32be . fromIntegral
 putMessage :: Message -> Put
 putMessage msg = do
     putWord32be (version1 .|. fromIntegral (messageType msg))
-    putTValue (TBinary . TE.encodeUtf8 $ messageName msg)
+    let name = TE.encodeUtf8 $ messageName msg
+    putLength (B.length name)
+    putByteString name
     putInt32be (messageId msg)
     putTValue (messagePayload msg)
+
+getMessage :: TypeCode -> Get Message
+getMessage typ = do
+    size <- getInt32be
+    if size < 0
+    then parseStrict size
+    else parseNonStrict size
+  where
+    -- versionAndType:4 name~4 seqid:4 payload
+    -- versionAndType = version:2 0x00 type:1
+    parseStrict versionAndType = do
+        let version = versionMask .&. fromIntegral versionAndType
+            tcode = fromIntegral (0x000000ff .&. versionAndType)
+        unless (version /= version1) (fail $ "Unsupported version: " ++ show version)
+        nlen <- getInt32be
+        Message <$> (TE.decodeUtf8 <$> getByteString (fromIntegral nlen))
+                <*> pure tcode
+                <*> getInt32be
+                <*> getTValue (if tcode == MT_Exception
+                                then getTypeCode (typeCode :: TypeCodeTagged AppException)
+                                else typ)
+
+    -- name~4 type:1 seqid:4 payload
+    parseNonStrict nlen =
+        Message <$> (TE.decodeUtf8 <$> getByteString (fromIntegral nlen))
+                <*> getInt8
+                <*> getInt32be
+                <*> getTValue typ
+
+------------------------------------------------------------------------------
 
 putTValue :: TValue -> Put
 putTValue v = case v of
@@ -91,36 +123,6 @@ putTValue v = case v of
         putLength (length a)
         mapM_ putTValue a
 
-------------------------------------------------------------------------------
-
-getMessage :: Int8 -> Get Message
-getMessage typ = do
-    size <- getInt32be
-    if size < 0
-    then parseStrict size
-    else parseNonStrict size
-  where
-    -- versionAndType:4 name~4 seqid:4 payload
-    -- versionAndType = version:2 0x00 type:1
-    parseStrict versionAndType = do
-        let version = versionMask .&. fromIntegral versionAndType
-            tcode = fromIntegral (0x000000ff .&. versionAndType)
-        unless (version /= version1) (fail $ "Unsupported version: " ++ show version)
-        nlen <- getInt32be
-        Message <$> (TE.decodeUtf8 <$> getByteString (fromIntegral nlen))
-                <*> pure tcode
-                <*> getInt32be
-                <*> getTValue (if tcode == MT_Exception
-                                then typ
-                                else getTypeCode (typeCode :: TypeCode AppException))
-
-    -- name~4 type:1 seqid:4 payload
-    parseNonStrict nlen =
-        Message <$> (TE.decodeUtf8 <$> getByteString (fromIntegral nlen))
-                <*> getInt8
-                <*> getInt32be
-                <*> getTValue typ
-
 getTValue :: Int8 -> Get TValue
 getTValue TC_Bool   = TBool . (/=0) <$> getWord8
 getTValue TC_Int8   = TInt8 <$> getInt8
@@ -128,7 +130,7 @@ getTValue TC_Double = TDouble <$> getDoublebe
 getTValue TC_Int16  = TInt16 <$> getInt16be
 getTValue TC_Int32  = TInt32 <$> getInt32be
 getTValue TC_Int64  = TInt64 <$> getInt64be
-getTValue TC_Binary = TBinary <$> (getByteString =<< getLength)
+getTValue TC_Binary = TBinary <$> (getLength >>= getByteString)
 getTValue TC_Struct = TStruct <$> go
   where
     go :: Get [(Int, TValue)]
@@ -140,7 +142,9 @@ getTValue TC_Struct = TStruct <$> go
             fid <- getInt16be
             val <- getTValue typ
             rest <- go
-            fid `seq` val `seq` return ((fromIntegral fid, val) : rest)
+            let fid' = fromIntegral fid
+            return ((fid', val) : rest)
+
 getTValue TC_Map    = do kt <- getInt8
                          vt <- getInt8
                          len <- getLength
@@ -153,3 +157,4 @@ getTValue TC_List   = do vt <- getInt8
                          len <- getLength
                          TList vt <$> replicateM len (getTValue vt)
 
+getTValue tc        = fail $ "bad type code: " ++ show tc

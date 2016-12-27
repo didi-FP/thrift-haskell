@@ -8,7 +8,8 @@
 {-# LANGUAGE DeriveAnyClass #-}
 
 module Thrift.Type
-  ( TypeCode(..)
+  ( -- * Thrift value and types
+    TypeCode
   , pattern TC_Stop
   , pattern TC_Void
   , pattern TC_Bool
@@ -24,26 +25,25 @@ module Thrift.Type
   , pattern TC_List
   , TValue(..)
   , tValueTC
+  , TypeCodeTagged(..)
   , Thrift(..)
+  -- * Message
+  , MessageType
+  , pattern MT_Call
+  , pattern MT_Reply
+  , pattern MT_Exception
+  , pattern MT_Oneway
+  , Message(..)
+  -- * Protocol and Transport
+  , Protocol(..)
+  , Transport(..)
+  , AppException(..)
+  -- * utilities used in compiled IDL
   , lookupOptional
   , lookupRequired
   , lookupDefault
   , IM.lookup
   , request
-
-  -- *
-  , Protocol(..)
-  , Message(..)
-
-  , pattern MT_Call
-  , pattern MT_Reply
-  , pattern MT_Exception
-  , pattern MT_Oneway
-
-
-  , Transport(..)
-  , AppException(..)
-  -- *
   , T.Text
   , B.ByteString
   , HM.HashMap
@@ -79,6 +79,8 @@ import System.IO.Streams.Binary (getFromStream)
 import System.IO.Streams.ByteString (writeLazyByteString)
 import System.IO.Unsafe (unsafePerformIO)
 
+type TypeCode = Int8
+
 -- | Singleton type to present all thrift values.
 --
 data TValue
@@ -90,10 +92,10 @@ data TValue
     | TDouble !Double
     | TBinary !B.ByteString
     | TStruct [(Int, TValue)]
-    | TMap    !Int8 !Int8 [(TValue, TValue)]
-    | TSet    !Int8 [TValue]
-    | TList   !Int8 [TValue]
-  deriving (Eq, Show)
+    | TMap    !TypeCode !TypeCode [(TValue, TValue)]
+    | TSet    !TypeCode [TValue]
+    | TList   !TypeCode [TValue]
+  deriving (Eq, Show, Data, Typeable, Generic)
 
 instance Hashable TValue where
     hashWithSalt s a = case a of
@@ -109,35 +111,22 @@ instance Hashable TValue where
         TSet x y   -> s `hashWithSalt` (8 :: Int) `hashWithSalt` x `hashWithSalt` y
         TList x y  -> s `hashWithSalt` (9 :: Int) `hashWithSalt` x `hashWithSalt` y
 
-pattern TC_Stop   :: Int8
-pattern TC_Stop   = 0
-pattern TC_Void   :: Int8
-pattern TC_Void   = 1
-pattern TC_Bool   :: Int8
-pattern TC_Bool   = 2
-pattern TC_Int8   :: Int8
-pattern TC_Int8   = 3
-pattern TC_Double :: Int8
-pattern TC_Double = 4
-pattern TC_Int16  :: Int8
-pattern TC_Int16  = 6
-pattern TC_Int32  :: Int8
-pattern TC_Int32  = 8
-pattern TC_Int64  :: Int8
-pattern TC_Int64  = 10
-pattern TC_Binary :: Int8
-pattern TC_Binary = 11
-pattern TC_Struct :: Int8
-pattern TC_Struct = 12
-pattern TC_Map    :: Int8
-pattern TC_Map    = 13
-pattern TC_Set    :: Int8
-pattern TC_Set    = 14
-pattern TC_List   :: Int8
-pattern TC_List   = 15
+pattern TC_Stop   = 0  :: TypeCode
+pattern TC_Void   = 1  :: TypeCode
+pattern TC_Bool   = 2  :: TypeCode
+pattern TC_Int8   = 3  :: TypeCode
+pattern TC_Double = 4  :: TypeCode
+pattern TC_Int16  = 6  :: TypeCode
+pattern TC_Int32  = 8  :: TypeCode
+pattern TC_Int64  = 10 :: TypeCode
+pattern TC_Binary = 11 :: TypeCode
+pattern TC_Struct = 12 :: TypeCode
+pattern TC_Map    = 13 :: TypeCode
+pattern TC_Set    = 14 :: TypeCode
+pattern TC_List   = 15 :: TypeCode
 
 -- | Map a 'TValue' to its type code.
-tValueTC :: TValue -> Int8
+tValueTC :: TValue -> TypeCode
 tValueTC (TBool    _)  = TC_Bool
 tValueTC (TInt8    _)  = TC_Int8
 tValueTC (TDouble  _)  = TC_Double
@@ -154,98 +143,98 @@ tValueTC (TList  _ _)  = TC_List
 -- | TypeCode tagged with value type, This is useful in empty `HM.HashMap` case:
 -- even if we don't have any concrete 'TValue', we still can get k & v 's type code.
 --
-newtype TypeCode a = TypeCode { getTypeCode :: Int8 }
+newtype TypeCodeTagged a = TypeCodeTagged { getTypeCode :: TypeCode }
 
 -- | The main class
 class Thrift a where
-    typeCode :: TypeCode a
+    typeCode :: TypeCodeTagged a
     defaultValue :: a
     toTValue :: a -> TValue
     fromTValue :: TValue -> a
 
 instance Thrift Bool where
-    typeCode = TypeCode TC_Bool
+    typeCode = TypeCodeTagged TC_Bool
     defaultValue = False
     toTValue i = TBool i
     fromTValue (TBool i) = i
     fromTValue _         = error "bad bool"
 
 instance Thrift Int8 where
-    typeCode = TypeCode TC_Int8
+    typeCode = TypeCodeTagged TC_Int8
     defaultValue = 0
     toTValue i = TInt8 i
     fromTValue (TInt8 i) = i
     fromTValue _         = error "bad int8"
 
 instance Thrift Double where
-    typeCode = TypeCode TC_Double
+    typeCode = TypeCodeTagged TC_Double
     defaultValue = 0
     toTValue i = TDouble i
     fromTValue (TDouble i) = i
     fromTValue _         = error "bad double"
 
 instance Thrift Int16 where
-    typeCode = TypeCode TC_Int16
+    typeCode = TypeCodeTagged TC_Int16
     defaultValue = 0
     toTValue i = TInt16 i
     fromTValue (TInt16 i) = i
     fromTValue _         = error "bad int16"
 
 instance Thrift Int32 where
-    typeCode = TypeCode TC_Int32
+    typeCode = TypeCodeTagged TC_Int32
     defaultValue = 0
     toTValue i = TInt32 i
     fromTValue (TInt32 i) = i
     fromTValue _         = error "bad int32"
 
 instance Thrift Int64 where
-    typeCode = TypeCode TC_Int64
+    typeCode = TypeCodeTagged TC_Int64
     defaultValue = 0
     toTValue i = TInt64 i
     fromTValue (TInt64 i) = i
     fromTValue _         = error "bad int64"
 
 instance Thrift T.Text where
-    typeCode = TypeCode TC_Binary
+    typeCode = TypeCodeTagged TC_Binary
     defaultValue = T.empty
     toTValue t = TBinary (T.encodeUtf8 t)
     fromTValue (TBinary b) = (T.decodeUtf8 b)
     fromTValue _         = error "bad string"
 
 instance Thrift B.ByteString where
-    typeCode = TypeCode TC_Binary
+    typeCode = TypeCodeTagged TC_Binary
     defaultValue = B.empty
     toTValue b = TBinary b
     fromTValue (TBinary b) = b
     fromTValue _         = error "bad binary"
 
 instance (Thrift k, Thrift v, Eq k, Eq v, Hashable k) => Thrift (HM.HashMap k v) where
-    typeCode = TypeCode TC_Map
+    typeCode = TypeCodeTagged TC_Map
     defaultValue = HM.empty
-    toTValue m = TMap (getTypeCode (typeCode :: TypeCode k))
-                    (getTypeCode (typeCode :: TypeCode v)) $
+    toTValue m = TMap (getTypeCode (typeCode :: TypeCodeTagged k))
+                    (getTypeCode (typeCode :: TypeCodeTagged v)) $
                     map (\ (k, v) -> (toTValue k, toTValue v)) (HM.toList m)
     fromTValue (TMap _ _ kvs) = HM.fromList $ map (\ (k, v) -> (fromTValue k, fromTValue v)) kvs
     fromTValue _         = error "bad map"
 
 instance (Thrift v, Eq v, Hashable v) => Thrift (HS.HashSet v) where
-    typeCode = TypeCode TC_Set
+    typeCode = TypeCodeTagged TC_Set
     defaultValue = HS.empty
-    toTValue s = TSet (getTypeCode (typeCode :: TypeCode v)) $
+    toTValue s = TSet (getTypeCode (typeCode :: TypeCodeTagged v)) $
                     map toTValue (HS.toList s)
     fromTValue (TSet _ xs) = HS.fromList $ map fromTValue xs
     fromTValue _         = error "bad set"
 
 instance (Thrift v) => Thrift [v] where
-    typeCode = TypeCode TC_List
+    typeCode = TypeCodeTagged TC_List
     defaultValue = []
-    toTValue xs = TList (getTypeCode (typeCode :: TypeCode v)) $
+    toTValue xs = TList (getTypeCode (typeCode :: TypeCodeTagged v)) $
                     map toTValue xs
     fromTValue (TList _ xs) = map fromTValue xs
     fromTValue _         = error "bad list"
 
 instance Thrift () where
-    typeCode = TypeCode TC_Struct
+    typeCode = TypeCodeTagged TC_Struct
     defaultValue = ()
     toTValue _ = TStruct []
     fromTValue (TStruct []) = ()
@@ -275,20 +264,18 @@ mkHashMap = HM.fromList
 --------------------------------------------------------------------------------
 
 -- | Type of message being sent.
+--
+type MessageType = Int8
 
-pattern MT_Call       :: Int8
-pattern MT_Call       = 1
-pattern MT_Reply      :: Int8
-pattern MT_Reply      = 2
-pattern MT_Exception  :: Int8
-pattern MT_Exception  = 3
-pattern MT_Oneway     :: Int8
-pattern MT_Oneway     = 4
+pattern MT_Call       = 1 :: MessageType
+pattern MT_Reply      = 2 :: MessageType
+pattern MT_Exception  = 3 :: MessageType
+pattern MT_Oneway     = 4 :: MessageType
 
 -- | Message envelope for Thrift payloads.
 data Message = Message
     { messageName    :: !T.Text
-    , messageType    :: !Int8
+    , messageType    :: !MessageType
     , messageId      :: !Int32
     , messagePayload :: !TValue
     }
@@ -298,7 +285,7 @@ data Message = Message
 data Protocol = Protocol
     { encodeMessage :: Message -> Put
     , encodeTValue  :: TValue -> Put
-    , decodeMessage :: Int8 -> Get Message
+    , decodeMessage :: TypeCode -> Get Message
     , decodeTValue  :: Int8 -> Get TValue
     }
 
@@ -336,7 +323,7 @@ request rpcName rpcOneWay Protocol{..} Transport{..} req = do
     if rpcOneWay
     then return defaultValue
     else do
-        res <- getFromStream (decodeMessage $ getTypeCode (typeCode :: TypeCode res))
+        res <- getFromStream (decodeMessage $ getTypeCode (typeCode :: TypeCodeTagged res))
                  transportInput
         case res of
             Just Message{..} -> do
@@ -383,7 +370,7 @@ data AppException = AppException
 
 instance Exception AppException
 instance Thrift AppException where
-    typeCode = TypeCode TC_Struct
+    typeCode = TypeCodeTagged TC_Struct
     defaultValue = AppException AE_UNKNOWN ""
     toTValue (AppException typ msg) =
         TStruct [ (1, toTValue msg) , (2, toTValue typ) ]
