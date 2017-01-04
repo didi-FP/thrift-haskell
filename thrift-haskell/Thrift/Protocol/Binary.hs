@@ -37,7 +37,7 @@ binaryProtocol :: Protocol
 binaryProtocol = Protocol putMessage putTValue getMessage getTValue
 
 versionMask :: Word32
-versionMask = 0x7fff0000
+versionMask = 0xffff0000
 
 version1 :: Word32
 version1 = 0x80010000
@@ -70,8 +70,8 @@ getMessage typ = do
     -- versionAndType = version:2 0x00 type:1
     parseStrict versionAndType = do
         let version = versionMask .&. fromIntegral versionAndType
-            tcode = fromIntegral (0x000000ff .&. versionAndType)
-        unless (version /= version1) (fail $ "Unsupported version: " ++ show version)
+            tcode = fromIntegral (0x00000007 .&. versionAndType)
+        when (version /= version1) (fail $ "Unsupported version: " ++ show version)
         nlen <- getInt32be
         Message <$> (TE.decodeUtf8 <$> getByteString (fromIntegral nlen))
                 <*> pure tcode
@@ -83,7 +83,7 @@ getMessage typ = do
     -- name~4 type:1 seqid:4 payload
     parseNonStrict nlen =
         Message <$> (TE.decodeUtf8 <$> getByteString (fromIntegral nlen))
-                <*> getInt8
+                <*> ((0x07 .&.) <$> getInt8)
                 <*> getInt32be
                 <*> getTValue typ
 
