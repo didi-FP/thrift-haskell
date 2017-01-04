@@ -211,7 +211,7 @@ compileTDef _ (T.TypeDefinition (T.EnumType T.Enum{..})) =
         (Just
             [ H.InsDecl () $ H.sfun (H.name "typeCode") []
                 (H.UnGuardedRhs ()
-                    (H.metaFunction "Thrift.TypeCode" [H.var $ H.name "Thrift.TC_Int32"]))
+                    (H.metaFunction "Thrift.TypeCodeTagged" [H.var $ H.name "Thrift.TC_Int32"]))
                 Nothing
             , H.InsDecl () $ H.sfun (H.name "defaultValue") []
                 (H.UnGuardedRhs () (H.var . mkCapName . T.enumDefName . head $ enumValues))
@@ -264,7 +264,7 @@ compileTDef cOpt (T.TypeDefinition (T.StructType struct@T.Struct{..})) = case st
                 (Just
                     [ H.InsDecl () $ H.sfun (H.name "typeCode") []
                         (H.UnGuardedRhs ()
-                            (H.metaFunction "Thrift.TypeCode" [H.var $ H.name "Thrift.TC_Struct"]))
+                            (H.metaFunction "Thrift.TypeCodeTagged" [H.var $ H.name "Thrift.TC_Struct"]))
                         Nothing
                     , H.InsDecl () $ H.sfun (H.name "defaultValue") []
                         (H.UnGuardedRhs () $ H.letE ((`map` sFields) $ \ T.Field{..} ->
@@ -390,7 +390,7 @@ compileTDef cOpt (T.TypeDefinition (T.StructType struct@T.Struct{..})) = case st
                 (Just
                     [ H.InsDecl () $ H.sfun (H.name "typeCode") []
                         (H.UnGuardedRhs ()
-                            (H.metaFunction "Thrift.TypeCode" [H.var $ H.name "Thrift.TC_Struct"]))
+                            (H.metaFunction "Thrift.TypeCodeTagged" [H.var $ H.name "Thrift.TC_Struct"]))
                         Nothing
                     , H.InsDecl () $ H.sfun (H.name "defaultValue") []
                         (H.UnGuardedRhs ()

@@ -18,7 +18,7 @@ cabal-version:       >=1.10
 library
   exposed-modules:      Thrift.Type
                     ,   Thrift.Protocol.Binary
-                    ,   Thrift.Transport.TCP
+                    ,   Thrift.Transport
   -- other-modules:       
   -- other-extensions:    
   build-depends:        base >=4.8 && <4.9

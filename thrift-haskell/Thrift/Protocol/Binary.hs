@@ -27,6 +27,7 @@ import qualified Data.HashSet        as HS
 import qualified Data.Text.Encoding  as TE
 import Data.Binary.Put
 import Data.Binary.Get
+import Data.Binary.IEEE754
 
 
 ------------------------------------------------------------------------------
