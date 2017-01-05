@@ -1,6 +1,8 @@
 thrift-haskell
 ==============
 
+[![Build Status](https://travis-ci.org/didi-FP/thrift-haskell.svg)](https://travis-ci.org/didi-FP/thrift-haskell)
+
 Haskell thrift codegen and runtime library, working in progress.
 
 thrift-haskell-compiler

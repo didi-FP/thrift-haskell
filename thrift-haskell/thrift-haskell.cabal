@@ -22,7 +22,7 @@ library
                     ,   Thrift.Transport
   -- other-modules:       
   -- other-extensions:    
-  build-depends:        base >=4.8 && <4.9
+  build-depends:        base >=4.7 && <5.0
                     ,   tcp-streams  >= 0.3
                     ,   io-streams
                     ,   wire-streams
