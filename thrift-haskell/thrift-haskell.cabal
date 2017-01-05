@@ -18,6 +18,7 @@ cabal-version:       >=1.10
 library
   exposed-modules:      Thrift.Type
                     ,   Thrift.Protocol.Binary
+                    ,   Thrift.Protocol.Compact
                     ,   Thrift.Transport
   -- other-modules:       
   -- other-extensions:    
@@ -38,6 +39,7 @@ library
 
 
   -- hs-source-dirs:      
+  ghc-options:         -Wall
   default-language:    Haskell2010
 
 
@@ -63,5 +65,7 @@ test-suite thrift-haskell-spec
         binary >= 0.8.3,
         binary-parsers
     other-modules:
+        Thrift.Arbitrary
         Thrift.Protocol.BinarySpec
+        Thrift.Protocol.CompactSpec
     default-language: Haskell2010
