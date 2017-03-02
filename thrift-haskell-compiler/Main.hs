@@ -451,9 +451,6 @@ compileTDef cOpt (T.TypeDefinition (T.StructType struct@T.Struct{..})) = case st
     -- we rely on @RecordWildCards@ to simplify naming
     sPat = H.PRec () (unQual sName) [H.PFieldWildcard ()]
     sExp = H.RecConstr () (unQual sName) [H.FieldWildcard ()]
-    fieldIdentifier = tail . reverse $ foldl' getValue [-1] (map T.fieldIdentifier structFields)
-    getValue acc@(x:xs) Nothing = (x + 1):acc
-    getValue acc (Just x') = x' : acc
 
 compileTDef _ (T.TypeDefinition (T.SenumType T.Senum{..})) = error "compileTDef: senum is deprecated"
 

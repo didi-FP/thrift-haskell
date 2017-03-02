@@ -5,7 +5,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DeriveAnyClass #-}
 
 module Thrift.Type
   ( -- * Thrift value and types
@@ -58,6 +57,7 @@ module Thrift.Type
   ) where
 
 import Data.Int
+import Data.Connection
 import Data.IORef (newIORef, atomicModifyIORef', IORef)
 import Control.Monad (when, unless)
 import Control.Exception (Exception(..), throwIO)
@@ -289,11 +289,7 @@ data Protocol = Protocol
     , decodeTValue  :: Int8 -> Get TValue
     }
 
-data Transport = Transport
-    { transportInput :: {-# UNPACK #-} !(InputStream  B.ByteString)
-    , transportOutput :: {-# UNPACK #-} !(OutputStream B.ByteString)
-    , transportClose :: IO ()
-    }
+type Transport = Connection ()
 
 seqIdGen :: IORef Int32
 seqIdGen = unsafePerformIO (newIORef 0)
@@ -311,20 +307,20 @@ request :: forall req res . (Thrift req, Thrift res)
         -> Protocol
         -> Transport
         -> req -> IO res
-request rpcName rpcOneWay Protocol{..} Transport{..} req = do
+request rpcName rpcOneWay Protocol{..} conn req = do
     sid <- seqId
     -- serialize request
     let msg = Message rpcName
                 (if rpcOneWay then MT_Oneway else MT_Call)
                 sid
                 (toTValue req)
-    writeLazyByteString (runPut (encodeMessage msg)) transportOutput
+    send conn (runPut (encodeMessage msg))
     -- deserialize respond
     if rpcOneWay
     then return defaultValue
     else do
         res <- getFromStream (decodeMessage $ getTypeCode (typeCode :: TypeCodeTagged res))
-                 transportInput
+                             (source conn)
         case res of
             Just Message{..} -> do
                 when (messageId /= sid) . throwIO $
@@ -366,7 +362,7 @@ pattern AE_UNSUPPORTED_CLIENT_TYPE    = 10
 data AppException = AppException
     { appExceptionType :: AppExType
     , appExceptionMessage :: T.Text
-    } deriving (Eq, Show, Typeable, Data, Generic, Hashable)
+    } deriving (Eq, Show, Typeable)
 
 instance Exception AppException
 instance Thrift AppException where

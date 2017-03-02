@@ -3,8 +3,8 @@
 
 name:                thrift-haskell
 version:             0.1.0.0
--- synopsis:            
--- description:         
+synopsis:            haskell thrift runtime.
+description:         haskell thrift runtime.
 license:             BSD3
 license-file:        LICENSE
 author:              winterland1989
@@ -23,7 +23,7 @@ library
   -- other-modules:       
   -- other-extensions:    
   build-depends:        base >=4.7 && <5.0
-                    ,   tcp-streams  >= 0.3
+                    ,   tcp-streams  >= 1.0
                     ,   io-streams
                     ,   wire-streams
                     ,   network
@@ -60,8 +60,6 @@ test-suite thrift-haskell-spec
         hspec >= 2.0,
         hspec-discover >= 2.1,
         QuickCheck >= 2.8,
-        bytestring-arbitrary,
-        quickcheck-text,
         binary >= 0.8.3,
         binary-parsers
     other-modules:
