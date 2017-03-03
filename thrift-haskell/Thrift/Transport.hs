@@ -13,17 +13,26 @@ import qualified System.IO.Streams as Streams
 import Thrift.Type
 import Data.Word
 
-openTcpTransport :: HostName
+-- | Open a TCP 'Transport'
+--
+-- This should be the most common 'Transport'.
+--
+openTransport :: HostName
               -> PortNumber
               -> IO Transport
-openTcpTransport h p = do
+openTransport h p = do
     (Connection src send cls _) <- TCP.connect h p
     return (Connection src send cls ())
 
+-- | Make a /framed/ 'Transport' from other 'Transport'.
+--
+-- The framed 'Transport' package message as a /frame/ : a size header and message payload.
+--
 framed :: Transport -> IO Transport
 framed (Connection src send cls _) = do
-    siz <- fromIntegral . bsToWord32be <$> Streams.readExactly 4 src  -- frame size
-    src' <- Streams.takeExactly siz src
+    src' <- Streams.makeInputStream $ do
+        siz <- fromIntegral . bsToWord32be <$> Streams.readExactly 4 src  -- frame size
+        Just <$> Streams.readExactly siz src
     return (Connection src' send' cls ())
   where
     send' lbs = do
@@ -43,3 +52,4 @@ framed (Connection src send cls _) = do
           (fromIntegral (s `B.unsafeIndex` 1) `shiftL` 16) .|.
           (fromIntegral (s `B.unsafeIndex` 2) `shiftL`  8) .|.
           (fromIntegral (s `B.unsafeIndex` 3) )
+
