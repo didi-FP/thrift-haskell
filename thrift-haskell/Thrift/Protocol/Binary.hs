@@ -25,16 +25,15 @@ import qualified Data.ByteString     as B
 import qualified Data.HashMap.Strict as HM
 import qualified Data.HashSet        as HS
 import qualified Data.Text.Encoding  as TE
-import Data.Binary.Put
-import Data.Binary.Get
-import Data.Binary.IEEE754
+import qualified Z.Data.Parser       as P
+import qualified Z.Data.Builder      as B
 
 
 ------------------------------------------------------------------------------
 
 -- | Provides an implementation of the Thrift Binary Protocol.
 binaryProtocol :: Protocol
-binaryProtocol = Protocol putMessage putTValue getMessage getTValue
+binaryProtocol = Protocol encodeMessage encodeTValue decodeMessage decodeTValue
 
 versionMask :: Word32
 versionMask = 0xffff0000
@@ -42,26 +41,26 @@ versionMask = 0xffff0000
 version1 :: Word32
 version1 = 0x80010000
 
-getLength :: Get Int
-getLength = fromIntegral <$> getInt32be
+decodeLength :: Parser Int
+decodeLength = fromIntegral <$> P.decodePrimBE @Int32
 
-putLength :: Int -> Put
-putLength = putInt32be . fromIntegral
+encodeLength :: Int -> Builder ()
+encodeLength = B.encodePrimBE@ Int32 . fromIntegral
 
 ------------------------------------------------------------------------------
 
-putMessage :: Message -> Put
-putMessage msg = do
-    putWord32be (version1 .|. fromIntegral (messageType msg))
-    let name = TE.encodeUtf8 $ messageName msg
-    putLength (B.length name)
-    putByteString name
-    putInt32be (messageId msg)
-    putTValue (messagePayload msg)
+encodeMessage :: Message -> Builder ()
+encodeMessage msg = do
+    B.encodePrimBE (version1 .|. fromIntegral (messageType msg))
+    let name = T.getUTF8Bytes msg
+    encodeLength (B.length name)
+    B.bytes name
+    B.encodePrimBE (messageId msg)
+    encodeTValue (messagePayload msg)
 
-getMessage :: TypeCode -> Get Message
-getMessage typ = do
-    size <- getInt32be
+decodeMessage :: TypeCode -> Parser Message
+decodeMessage typ = do
+    size <- P.decodePrimBE @Int32
     if size < 0
     then parseStrict size
     else parseNonStrict size
@@ -71,91 +70,90 @@ getMessage typ = do
     parseStrict versionAndType = do
         let version = versionMask .&. fromIntegral versionAndType
             tcode = fromIntegral (0x00000007 .&. versionAndType)
-        when (version /= version1) (fail $ "Unsupported version: " ++ show version)
-        nlen <- getInt32be
-        Message <$> (TE.decodeUtf8 <$> getByteString (fromIntegral nlen))
+        when (version /= version1) (P.fail' $ "Unsupported version: " <> T.toText version)
+        nlen <- P.decodePrimBE @Int32
+        Message <$> (T.validate <$> P.take (fromIntegral nlen))
                 <*> pure tcode
-                <*> getInt32be
-                <*> getTValue (if tcode == MT_Exception
+                <*> P.decodePrimBE @Int32
+                <*> decodeTValue (if tcode == MT_Exception
                                 then getTypeCode (typeCode :: TypeCodeTagged AppException)
                                 else typ)
 
     -- name~4 type:1 seqid:4 payload
     parseNonStrict nlen =
-        Message <$> (TE.decodeUtf8 <$> getByteString (fromIntegral nlen))
-                <*> ((0x07 .&.) <$> getInt8)
-                <*> getInt32be
-                <*> getTValue typ
+        Message <$> (T.validate <$> P.take (fromIntegral nlen))
+                <*> ((0x07 .&.) <$> P.anyWord8)
+                <*> P.decodePrimBE @Int32
+                <*> decodeTValue typ
 
 ------------------------------------------------------------------------------
 
-putTValue :: TValue -> Put
-putTValue v = case v of
-    (TBinary a) -> do putLength (B.length a)
-                      putByteString a
-    (TBool   a) -> putInt8 (if a then 1 else 0)
-    (TInt8   a) -> putInt8 a
-    (TDouble a) -> putDoublebe a
-    (TInt16  a) -> putInt16be a
-    (TInt32  a) -> putInt32be a
-    (TInt64  a) -> putInt64be a
+encodeTValue :: TValue -> Builder ()
+encodeTValue v = case v of
+    (TBinary a) -> do encodeLength (B.length a)
+                      B.bytes a
+    (TBool   a) -> B.word8 (if a then 1 else 0)
+    (TInt8   a) -> B.encodePrim a
+    (TDouble a) -> B.encodePrimBE a
+    (TInt16  a) -> B.encodePrimBE a
+    (TInt32  a) -> B.encodePrimBE a
+    (TInt64  a) -> B.encodePrimBE a
     (TStruct a) -> do
         forM_ a $ \ (fid, val) -> do
-            putInt8 (tValueTC val)
-            putInt16be (fromIntegral fid)
-            putTValue val
-        putInt8 TC_Stop
+            B.word8 (tValueTC val)
+            B.encodePrimBE fid
+            encodeTValue val
+        B.word8 TC_Stop
 
     (TList t a) -> do
-        putInt8 t
-        putLength (length a)
-        mapM_ putTValue a
+        B.word8 t
+        encodeLength (length a)
+        mapM_ encodeTValue a
 
     (TMap tk tv a) -> do
-        putInt8 tk
-        putInt8 tv
-        putLength (length a)
+        B.word8 tk
+        B.word8 tv
+        encodeLength (length a)
         forM_ a $ \ (key, val) -> do
-            putTValue key
-            putTValue val
+            encodeTValue key
+            encodeTValue val
 
     (TSet t a) -> do
-        putInt8 t
-        putLength (length a)
-        mapM_ putTValue a
+        B.word8 t
+        encodeLength (length a)
+        mapM_ encodeTValue a
 
-getTValue :: Int8 -> Get TValue
-getTValue TC_Bool   = TBool . (/=0) <$> getWord8
-getTValue TC_Int8   = TInt8 <$> getInt8
-getTValue TC_Double = TDouble <$> getDoublebe
-getTValue TC_Int16  = TInt16 <$> getInt16be
-getTValue TC_Int32  = TInt32 <$> getInt32be
-getTValue TC_Int64  = TInt64 <$> getInt64be
-getTValue TC_Binary = TBinary <$> (getLength >>= getByteString)
-getTValue TC_Struct = TStruct <$> go
+decodeTValue :: Int8 -> Parser TValue
+decodeTValue TC_Bool   = TBool . (/=0) <$> P.decodePrim
+decodeTValue TC_Int8   = TInt8 <$> P.decodePrim
+decodeTValue TC_Double = TDouble <$> P.decodePrimBE @Double
+decodeTValue TC_Int16  = TInt16 <$> P.decodePrimBE @Int16
+decodeTValue TC_Int32  = TInt32 <$> P.decodePrimBE @Int32
+decodeTValue TC_Int64  = TInt64 <$> P.decodePrimBE @Int64
+decodeTValue TC_Binary = TBinary <$> (decodeLength >>= P.take)
+decodeTValue TC_Struct = TStruct <$> go
   where
-    go :: Get [(Int, TValue)]
+    go :: Parser [(Int, TValue)]
     go = do
-        typ <- getInt8
+        typ <- P.anyWord8
         if typ == TC_Stop
         then return []
         else do
-            fid <- getInt16be
-            val <- getTValue typ
+            fid <- P.decodePrimBE
+            val <- decodeTValue typ
             rest <- go
-            let fid' = fromIntegral fid
-            return ((fid', val) : rest)
+            return ((fid, val) : rest)
 
-getTValue TC_Map    = do kt <- getInt8
-                         vt <- getInt8
-                         len <- getLength
+decodeTValue TC_Map    = do kt <- P.decodePrim
+                         vt <- P.decodePrim
+                         len <- decodeLength
                          TMap kt vt <$>
-                            replicateM len ((,) <$> getTValue kt <*> getTValue vt)
-getTValue TC_Set    = do vt <- getInt8
-                         len <- getLength
-                         TSet vt <$> replicateM len (getTValue vt)
-getTValue TC_List   = do vt <- getInt8
-                         len <- getLength
-                         TList vt <$> replicateM len (getTValue vt)
+                            replicateM len ((,) <$> decodeTValue kt <*> decodeTValue vt)
+decodeTValue TC_Set    = do vt <- P.decodePrim
+                         len <- decodeLength
+                         TSet vt <$> replicateM len (decodeTValue vt)
+decodeTValue TC_List   = do vt <- P.decodePrim
+                         len <- decodeLength
+                         TList vt <$> replicateM len (decodeTValue vt)
 
-getTValue tc        = fail $ "bad type code: " ++ show tc
+decodeTValue tc        = fail $ "bad type code: " ++ show tc
